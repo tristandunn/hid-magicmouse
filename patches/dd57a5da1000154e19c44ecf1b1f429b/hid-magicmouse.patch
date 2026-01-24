@@ -1,0 +1,125 @@
+--- patches/dd57a5da1000154e19c44ecf1b1f429b/original.c	2026-01-23 18:02:42.917984654 -0500
++++ patches/dd57a5da1000154e19c44ecf1b1f429b/modified.c	2026-01-23 19:37:45.453704095 -0500
+@@ -51,6 +51,10 @@
+ module_param(report_undeciphered, bool, 0644);
+ MODULE_PARM_DESC(report_undeciphered, "Report undeciphered multi-touch state field using a MSC_RAW event");
+ 
++static bool scroll_while_moving = false;
++module_param(scroll_while_moving, bool, 0644);
++MODULE_PARM_DESC(scroll_while_moving, "Enable scrolling when the mouse is moving");
++
+ #define TRACKPAD2_2021_BT_VERSION 0x110
+ #define TRACKPAD_2024_BT_VERSION 0x314
+ 
+@@ -78,6 +82,7 @@
+ #define SCROLL_HR_MULT (120 / SCROLL_HR_STEPS)
+ #define SCROLL_HR_THRESHOLD 90 /* units */
+ #define SCROLL_ACCEL_DEFAULT 7
++#define SCROLL_ACCEL_MIN 3
+ 
+ /* Touch surface information. Dimension is in hundredths of a mm, min and max
+  * are in units. */
+@@ -132,6 +137,8 @@
+ 	int ntouches;
+ 	int scroll_accel;
+ 	unsigned long scroll_jiffies;
++	int delta_x;
++	int delta_y;
+ 
+ 	struct {
+ 		short x;
+@@ -261,9 +268,11 @@
+ 	msc->touches[id].size = size;
+ 
+ 	/* If requested, emulate a scroll wheel by detecting small
+-	 * vertical touch motions.
++	 * vertical touch motions. Skip if the mouse is moving and
++	 * scroll_while_moving is disabled.
+ 	 */
+ 	if (emulate_scroll_wheel &&
++	    (scroll_while_moving || !(msc->delta_x || msc->delta_y)) &&
+ 	    input->id.product != USB_DEVICE_ID_APPLE_MAGICTRACKPAD2 &&
+ 	    input->id.product != USB_DEVICE_ID_APPLE_MAGICTRACKPAD2_USBC) {
+ 		unsigned long now = jiffies;
+@@ -291,7 +300,8 @@
+ 			if (scroll_acceleration && time_before(now,
+ 						msc->scroll_jiffies + HZ / 2))
+ 				msc->scroll_accel = max_t(int,
+-						msc->scroll_accel - 1, 1);
++						msc->scroll_accel - 1,
++						SCROLL_ACCEL_MIN);
+ 			else
+ 				msc->scroll_accel = SCROLL_ACCEL_DEFAULT;
+ 
+@@ -348,6 +358,14 @@
+ 			}
+ 			break;
+ 		}
++	} else if (emulate_scroll_wheel && !scroll_while_moving &&
++		   (msc->delta_x || msc->delta_y)) {
++		/* Reset scroll tracking when mouse is moving to prevent jumps. */
++		msc->touches[id].scroll_x = x;
++		msc->touches[id].scroll_y = y;
++		msc->touches[id].scroll_x_hr = x;
++		msc->touches[id].scroll_y_hr = y;
++		msc->scroll_accel = SCROLL_ACCEL_DEFAULT;
+ 	}
+ 
+ 	if (down)
+@@ -390,6 +408,10 @@
+ 	struct input_dev *input = msc->input;
+ 	int x = 0, y = 0, ii, clicks = 0, npoints;
+ 
++	/* Clear movement delta for scroll_while_moving. */
++	msc->delta_x = 0;
++	msc->delta_y = 0;
++
+ 	switch (data[0]) {
+ 	case TRACKPAD_REPORT_ID:
+ 	case TRACKPAD2_BT_REPORT_ID:
+@@ -440,6 +462,13 @@
+ 					size);
+ 			return 0;
+ 		}
++
++		/* Extract movement for scroll_while_moving. */
++		x = (int)(((data[3] & 0x0c) << 28) | (data[1] << 22)) >> 22;
++		y = (int)(((data[3] & 0x30) << 26) | (data[2] << 22)) >> 22;
++		msc->delta_x = x;
++		msc->delta_y = y;
++
+ 		msc->ntouches = 0;
+ 		for (ii = 0; ii < npoints; ii++)
+ 			magicmouse_emit_touch(msc, ii, data + ii * 8 + 6);
+@@ -448,8 +477,6 @@
+ 		 * to have the current touch information before
+ 		 * generating a click event.
+ 		 */
+-		x = (int)(((data[3] & 0x0c) << 28) | (data[1] << 22)) >> 22;
+-		y = (int)(((data[3] & 0x30) << 26) | (data[2] << 22)) >> 22;
+ 		clicks = data[3];
+ 
+ 		/* The following bits provide a device specific timestamp. They
+@@ -468,6 +495,13 @@
+ 					size);
+ 			return 0;
+ 		}
++
++		/* Extract movement for scroll_while_moving. */
++		x = (int)((data[3] << 24) | (data[2] << 16)) >> 16;
++		y = (int)((data[5] << 24) | (data[4] << 16)) >> 16;
++		msc->delta_x = x;
++		msc->delta_y = y;
++
+ 		msc->ntouches = 0;
+ 		for (ii = 0; ii < npoints; ii++)
+ 			magicmouse_emit_touch(msc, ii, data + ii * 8 + 14);
+@@ -476,8 +510,6 @@
+ 		 * to have the current touch information before
+ 		 * generating a click event.
+ 		 */
+-		x = (int)((data[3] << 24) | (data[2] << 16)) >> 16;
+-		y = (int)((data[5] << 24) | (data[4] << 16)) >> 16;
+ 		clicks = data[1];
+ 
+ 		/* The following bits provide a device specific timestamp. They
