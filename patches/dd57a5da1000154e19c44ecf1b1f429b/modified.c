@@ -365,6 +365,8 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id, u8 *tda
 		msc->touches[id].scroll_y = y;
 		msc->touches[id].scroll_x_hr = x;
 		msc->touches[id].scroll_y_hr = y;
+		msc->touches[id].scroll_x_active = false;
+		msc->touches[id].scroll_y_active = false;
 		msc->scroll_accel = SCROLL_ACCEL_DEFAULT;
 	}
 

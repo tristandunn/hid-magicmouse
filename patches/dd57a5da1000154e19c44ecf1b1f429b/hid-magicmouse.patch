@@ -1,5 +1,5 @@
---- patches/dd57a5da1000154e19c44ecf1b1f429b/original.c	2026-01-23 18:02:42.917984654 -0500
-+++ patches/dd57a5da1000154e19c44ecf1b1f429b/modified.c	2026-01-23 19:37:45.453704095 -0500
+--- patches/dd57a5da1000154e19c44ecf1b1f429b/original.c	2026-01-23 23:02:42.917984654 +0000
++++ patches/dd57a5da1000154e19c44ecf1b1f429b/modified.c	2026-02-05 00:06:08.011888399 +0000
 @@ -51,6 +51,10 @@
  module_param(report_undeciphered, bool, 0644);
  MODULE_PARM_DESC(report_undeciphered, "Report undeciphered multi-touch state field using a MSC_RAW event");
@@ -51,7 +51,7 @@
  			else
  				msc->scroll_accel = SCROLL_ACCEL_DEFAULT;
  
-@@ -348,6 +358,14 @@
+@@ -348,6 +358,16 @@
  			}
  			break;
  		}
@@ -62,11 +62,13 @@
 +		msc->touches[id].scroll_y = y;
 +		msc->touches[id].scroll_x_hr = x;
 +		msc->touches[id].scroll_y_hr = y;
++		msc->touches[id].scroll_x_active = false;
++		msc->touches[id].scroll_y_active = false;
 +		msc->scroll_accel = SCROLL_ACCEL_DEFAULT;
  	}
  
  	if (down)
-@@ -390,6 +408,10 @@
+@@ -390,6 +410,10 @@
  	struct input_dev *input = msc->input;
  	int x = 0, y = 0, ii, clicks = 0, npoints;
  
@@ -77,7 +79,7 @@
  	switch (data[0]) {
  	case TRACKPAD_REPORT_ID:
  	case TRACKPAD2_BT_REPORT_ID:
-@@ -440,6 +462,13 @@
+@@ -440,6 +464,13 @@
  					size);
  			return 0;
  		}
@@ -91,7 +93,7 @@
  		msc->ntouches = 0;
  		for (ii = 0; ii < npoints; ii++)
  			magicmouse_emit_touch(msc, ii, data + ii * 8 + 6);
-@@ -448,8 +477,6 @@
+@@ -448,8 +479,6 @@
  		 * to have the current touch information before
  		 * generating a click event.
  		 */
@@ -100,7 +102,7 @@
  		clicks = data[3];
  
  		/* The following bits provide a device specific timestamp. They
-@@ -468,6 +495,13 @@
+@@ -468,6 +497,13 @@
  					size);
  			return 0;
  		}
@@ -114,7 +116,7 @@
  		msc->ntouches = 0;
  		for (ii = 0; ii < npoints; ii++)
  			magicmouse_emit_touch(msc, ii, data + ii * 8 + 14);
-@@ -476,8 +510,6 @@
+@@ -476,8 +512,6 @@
  		 * to have the current touch information before
  		 * generating a click event.
  		 */
