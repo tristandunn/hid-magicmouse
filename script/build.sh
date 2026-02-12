@@ -2,6 +2,8 @@
 
 set -eou pipefail
 
+VERSION=$(cat "$(dirname "$0")/../VERSION")
+
 # Fetch the source files.
 mkdir -p ./source
 curl -sS -o ./source/hid_magicmouse.c \
@@ -35,9 +37,9 @@ clean:
 EOF
 
 # Create the DKMS configuration.
-cat << 'EOF' | tee ./source/dkms.conf > /dev/null
+cat << EOF | tee ./source/dkms.conf > /dev/null
 PACKAGE_NAME="hid-magicmouse-custom"
-PACKAGE_VERSION="0.1.0"
+PACKAGE_VERSION="${VERSION}"
 BUILT_MODULE_NAME="hid_magicmouse"
 DEST_MODULE_LOCATION="/kernel/drivers/hid"
 AUTOINSTALL="yes"

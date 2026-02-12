@@ -2,11 +2,13 @@
 
 set -eou pipefail
 
+VERSION=$(cat "$(dirname "$0")/../VERSION")
+
 # Remove the DKMS driver.
-sudo dkms remove -m hid-magicmouse-custom -v 0.1.0 --all 2>/dev/null || true
+sudo dkms remove -m hid-magicmouse-custom -v ${VERSION} --all 2>/dev/null || true
 
 # Remove the source directory.
-sudo rm -rf /usr/src/hid-magicmouse-custom-0.1.0
+sudo rm -rf /usr/src/hid-magicmouse-custom-${VERSION}
 
 # Remove configuration files.
 sudo rm -f /etc/modules-load.d/hid-magicmouse.conf

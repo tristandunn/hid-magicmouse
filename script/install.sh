@@ -2,19 +2,21 @@
 
 set -eou pipefail
 
+VERSION=$(cat "$(dirname "$0")/../VERSION")
+
 # Install dependencies.
 sudo pacman -S --needed dkms linux-headers
 
 # Create the source directory.
-sudo mkdir -p /usr/src/hid-magicmouse-custom-0.1.0
+sudo mkdir -p /usr/src/hid-magicmouse-custom-${VERSION}
 
 # Copy all source files.
-sudo cp ./source/* /usr/src/hid-magicmouse-custom-0.1.0/
+sudo cp ./source/* /usr/src/hid-magicmouse-custom-${VERSION}/
 
 # Clear and register the driver.
-sudo dkms remove -m hid-magicmouse-custom -v 0.1.0 --all 2>/dev/null || true
-sudo dkms build -m hid-magicmouse-custom -v 0.1.0
-sudo dkms install -m hid-magicmouse-custom -v 0.1.0
+sudo dkms remove -m hid-magicmouse-custom -v ${VERSION} --all 2>/dev/null || true
+sudo dkms build -m hid-magicmouse-custom -v ${VERSION}
+sudo dkms install -m hid-magicmouse-custom -v ${VERSION}
 
 # Create a default configuration if one doesn't exist.
 if [ ! -e /etc/modprobe.d/hid-magicmouse.conf ]; then
