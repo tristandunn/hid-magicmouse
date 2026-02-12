@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Ensure the module loads reliably at boot.
 - Reset scroll active flags when the mouse moves.
 - Install a default configuration when needed.
 

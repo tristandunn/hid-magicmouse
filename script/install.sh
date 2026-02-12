@@ -21,6 +21,12 @@ if [ ! -e /etc/modprobe.d/hid-magicmouse.conf ]; then
   sudo cp ./config/hid-magicmouse.conf /etc/modprobe.d/hid-magicmouse.conf
 fi
 
+# Ensure the module loads at boot.
+echo "hid_magicmouse" | sudo tee /etc/modules-load.d/hid-magicmouse.conf > /dev/null
+
+# Rebuild the initramfs to include new configuration.
+sudo mkinitcpio -P
+
 # Reload the module.
 sudo modprobe -r hid_magicmouse
 sudo modprobe hid_magicmouse
