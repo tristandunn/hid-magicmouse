@@ -5,6 +5,7 @@
 - Ensure the module loads reliably at boot.
 - Reset scroll active flags when the mouse moves.
 - Install a default configuration when needed.
+- Generate patch for the latest file version.
 
 ## 0.1.0 — January 23rd, 2026
 
