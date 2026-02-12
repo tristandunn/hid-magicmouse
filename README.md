@@ -32,18 +32,21 @@ make uninstall
 
 ## Configuration
 
-The driver can be configured via module parameters. To change settings at runtime:
+A default configuration is installed to `/etc/modprobe.d/hid-magicmouse.conf`,
+if one doesn't already exist. You can edit this file to change the default
+module parameters, or edit `config/hid-magicmouse.conf` in this repository to
+change the defaults for future installations.
+
+> [!IMPORTANT]
+> The configuration must be a regular file, not a symlink. If the symlink target
+> is not mounted during early boot, kmod will deny-list the module and it will
+> not load.
+
+To change settings at runtime without rebooting:
 
 ```sh
 # Enable scrolling while the mouse is moving, which is disabled by default.
 echo 1 | sudo tee /sys/module/hid_magicmouse/parameters/scroll_while_moving
-```
-
-To make settings persistent, create a modprobe configuration file:
-
-```sh
-# /etc/modprobe.d/hid-magicmouse.conf
-options hid_magicmouse scroll_while_moving=1
 ```
 
 Available parameters:
