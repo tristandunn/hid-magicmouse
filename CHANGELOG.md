@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Report battery percentage when connected.
+- Poll for the battery percentage.
 - Ensure the module loads reliably at boot.
 - Reset scroll active flags when the mouse moves.
 - Install a default configuration when needed.
