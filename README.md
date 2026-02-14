@@ -6,6 +6,7 @@ people migrating from macOS.
 - Prevent scrolling when the mouse is moving.
 - Reset scroll tracking when the mouse moves.
 - Decrease the maximum scroll acceleration.
+- Report battery status.
 
 ## Installation
 
