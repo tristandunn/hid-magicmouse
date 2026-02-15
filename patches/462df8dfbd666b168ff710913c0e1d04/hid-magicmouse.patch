@@ -1,5 +1,5 @@
 --- patches/462df8dfbd666b168ff710913c0e1d04/original.c	2026-02-12 18:29:03.093401277 -0500
-+++ patches/462df8dfbd666b168ff710913c0e1d04/modified.c	2026-02-13 21:13:59.061051733 -0500
++++ patches/462df8dfbd666b168ff710913c0e1d04/modified.c	2026-02-17 21:08:19.003833119 -0500
 @@ -15,6 +15,7 @@
  #include <linux/hid.h>
  #include <linux/input/mt.h>
@@ -8,7 +8,7 @@
  #include <linux/slab.h>
  #include <linux/workqueue.h>
  
-@@ -51,6 +52,10 @@
+@@ -51,6 +52,14 @@
  module_param(report_undeciphered, bool, 0644);
  MODULE_PARM_DESC(report_undeciphered, "Report undeciphered multi-touch state field using a MSC_RAW event");
  
@@ -16,10 +16,14 @@
 +module_param(scroll_while_moving, bool, 0644);
 +MODULE_PARM_DESC(scroll_while_moving, "Enable scrolling when the mouse is moving");
 +
++static bool scroll_while_clicking = false;
++module_param(scroll_while_clicking, bool, 0644);
++MODULE_PARM_DESC(scroll_while_clicking, "Enable scrolling when a button is held");
++
  #define TRACKPAD2_2021_BT_VERSION 0x110
  #define TRACKPAD_2024_BT_VERSION 0x314
  
-@@ -60,7 +65,8 @@
+@@ -60,7 +69,8 @@
  #define MOUSE_REPORT_ID    0x29
  #define MOUSE2_REPORT_ID   0x12
  #define DOUBLE_REPORT_ID   0xf7
@@ -29,7 +33,7 @@
  
  /* These definitions are not precise, but they're close enough.  (Bits
   * 0x03 seem to indicate the aspect ratio of the touch, bits 0x70 seem
-@@ -78,6 +84,7 @@
+@@ -78,6 +88,7 @@
  #define SCROLL_HR_MULT (120 / SCROLL_HR_STEPS)
  #define SCROLL_HR_THRESHOLD 90 /* units */
  #define SCROLL_ACCEL_DEFAULT 7
@@ -37,7 +41,7 @@
  
  /* Touch surface information. Dimension is in hundredths of a mm, min and max
   * are in units. */
-@@ -123,7 +130,11 @@
+@@ -123,7 +134,11 @@
   * @tracking_ids: Mapping of current touch input data to @touches.
   * @hdev: Pointer to the underlying HID device.
   * @work: Workqueue to handle initialization retry for quirky devices.
@@ -50,16 +54,17 @@
   */
  struct magicmouse_sc {
  	struct input_dev *input;
-@@ -132,6 +143,8 @@
+@@ -132,6 +147,9 @@
  	int ntouches;
  	int scroll_accel;
  	unsigned long scroll_jiffies;
 +	int delta_x;
 +	int delta_y;
++	bool button_down;
  
  	struct {
  		short x;
-@@ -149,6 +162,10 @@
+@@ -149,6 +167,10 @@
  	struct hid_device *hdev;
  	struct delayed_work work;
  	struct timer_list battery_timer;
@@ -70,20 +75,21 @@
  };
  
  static int magicmouse_firm_touch(struct magicmouse_sc *msc)
-@@ -261,9 +278,11 @@
+@@ -261,9 +283,12 @@
  	msc->touches[id].size = size;
  
  	/* If requested, emulate a scroll wheel by detecting small
 -	 * vertical touch motions.
-+	 * vertical touch motions. Skip if the mouse is moving and
-+	 * scroll_while_moving is disabled.
++	 * vertical touch motions. Skip when the mouse is moving or a
++	 * button is held, unless the corresponding option is enabled.
  	 */
  	if (emulate_scroll_wheel &&
 +	    (scroll_while_moving || !(msc->delta_x || msc->delta_y)) &&
++	    (scroll_while_clicking || !msc->button_down) &&
  	    input->id.product != USB_DEVICE_ID_APPLE_MAGICTRACKPAD2 &&
  	    input->id.product != USB_DEVICE_ID_APPLE_MAGICTRACKPAD2_USBC) {
  		unsigned long now = jiffies;
-@@ -291,7 +310,8 @@
+@@ -291,7 +316,8 @@
  			if (scroll_acceleration && time_before(now,
  						msc->scroll_jiffies + HZ / 2))
  				msc->scroll_accel = max_t(int,
@@ -93,13 +99,14 @@
  			else
  				msc->scroll_accel = SCROLL_ACCEL_DEFAULT;
  
-@@ -348,6 +368,16 @@
+@@ -348,6 +374,17 @@
  			}
  			break;
  		}
-+	} else if (emulate_scroll_wheel && !scroll_while_moving &&
-+		   (msc->delta_x || msc->delta_y)) {
-+		/* Reset scroll tracking when mouse is moving to prevent jumps. */
++	} else if (emulate_scroll_wheel &&
++		   ((!scroll_while_moving && (msc->delta_x || msc->delta_y)) ||
++		    (!scroll_while_clicking && msc->button_down))) {
++		/* Reset scroll tracking when scrolling is suppressed to prevent jumps. */
 +		msc->touches[id].scroll_x = x;
 +		msc->touches[id].scroll_y = y;
 +		msc->touches[id].scroll_x_hr = x;
@@ -110,7 +117,7 @@
  	}
  
  	if (down)
-@@ -383,13 +413,66 @@
+@@ -383,13 +420,67 @@
  	}
  }
  
@@ -171,60 +178,77 @@
 +	if (!input)
 +		return 0;
 +
-+	/* Clear movement delta for scroll_while_moving. */
++	/* Clear movement delta and click state for scroll tracking. */
 +	msc->delta_x = 0;
 +	msc->delta_y = 0;
++	msc->button_down = false;
 +
  	switch (data[0]) {
  	case TRACKPAD_REPORT_ID:
  	case TRACKPAD2_BT_REPORT_ID:
-@@ -440,6 +523,13 @@
+@@ -440,6 +531,15 @@
  					size);
  			return 0;
  		}
 +
-+		/* Extract movement for scroll_while_moving. */
++		/* Extract movement and clicks for scroll tracking. */
 +		x = (int)(((data[3] & 0x0c) << 28) | (data[1] << 22)) >> 22;
 +		y = (int)(((data[3] & 0x30) << 26) | (data[2] << 22)) >> 22;
 +		msc->delta_x = x;
 +		msc->delta_y = y;
++		clicks = data[3];
++		msc->button_down = !!(clicks & 3);
 +
  		msc->ntouches = 0;
  		for (ii = 0; ii < npoints; ii++)
  			magicmouse_emit_touch(msc, ii, data + ii * 8 + 6);
-@@ -448,8 +538,6 @@
+@@ -447,12 +547,8 @@
+ 		/* When emulating three-button mode, it is important
  		 * to have the current touch information before
  		 * generating a click event.
- 		 */
+-		 */
 -		x = (int)(((data[3] & 0x0c) << 28) | (data[1] << 22)) >> 22;
 -		y = (int)(((data[3] & 0x30) << 26) | (data[2] << 22)) >> 22;
- 		clicks = data[3];
- 
- 		/* The following bits provide a device specific timestamp. They
-@@ -468,6 +556,13 @@
+-		clicks = data[3];
+-
+-		/* The following bits provide a device specific timestamp. They
++		 *
++		 * The following bits provide a device specific timestamp. They
+ 		 * are unused here.
+ 		 *
+ 		 * ts = data[3] >> 6 | data[4] << 2 | data[5] << 10;
+@@ -468,6 +564,15 @@
  					size);
  			return 0;
  		}
 +
-+		/* Extract movement for scroll_while_moving. */
++		/* Extract movement and clicks for scroll tracking. */
 +		x = (int)((data[3] << 24) | (data[2] << 16)) >> 16;
 +		y = (int)((data[5] << 24) | (data[4] << 16)) >> 16;
 +		msc->delta_x = x;
 +		msc->delta_y = y;
++		clicks = data[1];
++		msc->button_down = !!(clicks & 3);
 +
  		msc->ntouches = 0;
  		for (ii = 0; ii < npoints; ii++)
  			magicmouse_emit_touch(msc, ii, data + ii * 8 + 14);
-@@ -476,8 +571,6 @@
+@@ -475,12 +580,8 @@
+ 		/* When emulating three-button mode, it is important
  		 * to have the current touch information before
  		 * generating a click event.
- 		 */
+-		 */
 -		x = (int)((data[3] << 24) | (data[2] << 16)) >> 16;
 -		y = (int)((data[5] << 24) | (data[4] << 16)) >> 16;
- 		clicks = data[1];
- 
- 		/* The following bits provide a device specific timestamp. They
-@@ -522,6 +615,16 @@
+-		clicks = data[1];
+-
+-		/* The following bits provide a device specific timestamp. They
++		 *
++		 * The following bits provide a device specific timestamp. They
+ 		 * are unused here.
+ 		 *
+ 		 * ts = data[11] >> 6 | data[12] << 2 | data[13] << 10;
+@@ -522,6 +623,16 @@
  		struct hid_usage *usage, __s32 value)
  {
  	struct magicmouse_sc *msc = hid_get_drvdata(hdev);
@@ -241,7 +265,7 @@
  	if ((msc->input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE2 ||
  	     msc->input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE2_USBC) &&
  	    field->report->id == MOUSE2_REPORT_ID) {
-@@ -812,6 +915,14 @@
+@@ -812,6 +923,14 @@
  	       product == USB_DEVICE_ID_APPLE_MAGICTRACKPAD2_USBC;
  }
  
@@ -256,7 +280,7 @@
  static int magicmouse_fetch_battery(struct hid_device *hdev)
  {
  #ifdef CONFIG_HID_BATTERY_STRENGTH
-@@ -846,10 +957,49 @@
+@@ -846,10 +965,49 @@
  
  	if (magicmouse_fetch_battery(hdev) == 0) {
  		mod_timer(&msc->battery_timer,
@@ -307,7 +331,7 @@
  static int magicmouse_probe(struct hid_device *hdev,
  	const struct hid_device_id *id)
  {
-@@ -876,6 +1026,14 @@
+@@ -876,6 +1034,14 @@
  		return ret;
  	}
  
@@ -322,7 +346,7 @@
  	ret = hid_hw_start(hdev, HID_CONNECT_DEFAULT);
  	if (ret) {
  		hid_err(hdev, "magicmouse hw start failed\n");
-@@ -886,10 +1044,43 @@
+@@ -886,10 +1052,43 @@
  	    is_usb_magictrackpad2(id->vendor, id->product)) {
  		timer_setup(&msc->battery_timer, magicmouse_battery_timer_tick, 0);
  		mod_timer(&msc->battery_timer,
@@ -367,7 +391,7 @@
  	if (is_usb_magicmouse2(id->vendor, id->product) ||
  	    (is_usb_magictrackpad2(id->vendor, id->product) &&
  	     hdev->type != HID_TYPE_USBMOUSE))
-@@ -958,6 +1149,10 @@
+@@ -958,6 +1157,10 @@
  	if (is_usb_magicmouse2(id->vendor, id->product) ||
  	    is_usb_magictrackpad2(id->vendor, id->product))
  		timer_delete_sync(&msc->battery_timer);
@@ -378,7 +402,7 @@
  
  	hid_hw_stop(hdev);
  	return ret;
-@@ -972,6 +1167,10 @@
+@@ -972,6 +1175,10 @@
  		if (is_usb_magicmouse2(hdev->vendor, hdev->product) ||
  		    is_usb_magictrackpad2(hdev->vendor, hdev->product))
  			timer_delete_sync(&msc->battery_timer);

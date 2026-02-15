@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Prevent scrolling when a button is held.
+
 ## 0.2.0 — February 13th, 2026
 
 - Report battery percentage when connected.

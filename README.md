@@ -3,7 +3,7 @@
 A customized driver to improve the Apple Magic Mouse experience, especially for
 people migrating from macOS.
 
-- Prevent scrolling when the mouse is moving.
+- Prevent scrolling when the mouse is moving or a button is held.
 - Reset scroll tracking when the mouse moves.
 - Decrease the maximum scroll acceleration.
 - Report battery status.
@@ -55,6 +55,7 @@ Available parameters:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `scroll_while_moving` | `0` | Allow scrolling while the mouse is moving. |
+| `scroll_while_clicking` | `0` | Allow scrolling while a button is held. |
 | `scroll_acceleration` | `0` | Enable scroll acceleration. |
 | `scroll_speed` | `32` | Scroll speed from 0-63, where higher is faster. |
 | `emulate_scroll_wheel` | `1` | Enable touch-to-scroll emulation. |

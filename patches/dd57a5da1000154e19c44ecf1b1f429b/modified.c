@@ -56,6 +56,10 @@ static bool scroll_while_moving = false;
 module_param(scroll_while_moving, bool, 0644);
 MODULE_PARM_DESC(scroll_while_moving, "Enable scrolling when the mouse is moving");
 
+static bool scroll_while_clicking = false;
+module_param(scroll_while_clicking, bool, 0644);
+MODULE_PARM_DESC(scroll_while_clicking, "Enable scrolling when a button is held");
+
 #define TRACKPAD2_2021_BT_VERSION 0x110
 #define TRACKPAD_2024_BT_VERSION 0x314
 
@@ -145,6 +149,7 @@ struct magicmouse_sc {
 	unsigned long scroll_jiffies;
 	int delta_x;
 	int delta_y;
+	bool button_down;
 
 	struct {
 		short x;
@@ -278,11 +283,12 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id, u8 *tda
 	msc->touches[id].size = size;
 
 	/* If requested, emulate a scroll wheel by detecting small
-	 * vertical touch motions. Skip if the mouse is moving and
-	 * scroll_while_moving is disabled.
+	 * vertical touch motions. Skip when the mouse is moving or a
+	 * button is held, unless the corresponding option is enabled.
 	 */
 	if (emulate_scroll_wheel &&
 	    (scroll_while_moving || !(msc->delta_x || msc->delta_y)) &&
+	    (scroll_while_clicking || !msc->button_down) &&
 	    input->id.product != USB_DEVICE_ID_APPLE_MAGICTRACKPAD2 &&
 	    input->id.product != USB_DEVICE_ID_APPLE_MAGICTRACKPAD2_USBC) {
 		unsigned long now = jiffies;
@@ -368,9 +374,10 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id, u8 *tda
 			}
 			break;
 		}
-	} else if (emulate_scroll_wheel && !scroll_while_moving &&
-		   (msc->delta_x || msc->delta_y)) {
-		/* Reset scroll tracking when mouse is moving to prevent jumps. */
+	} else if (emulate_scroll_wheel &&
+		   ((!scroll_while_moving && (msc->delta_x || msc->delta_y)) ||
+		    (!scroll_while_clicking && msc->button_down))) {
+		/* Reset scroll tracking when scrolling is suppressed to prevent jumps. */
 		msc->touches[id].scroll_x = x;
 		msc->touches[id].scroll_y = y;
 		msc->touches[id].scroll_x_hr = x;
@@ -469,9 +476,10 @@ static int magicmouse_raw_event(struct hid_device *hdev,
 	if (!input)
 		return 0;
 
-	/* Clear movement delta for scroll_while_moving. */
+	/* Clear movement delta and click state for scroll tracking. */
 	msc->delta_x = 0;
 	msc->delta_y = 0;
+	msc->button_down = false;
 
 	switch (data[0]) {
 	case TRACKPAD_REPORT_ID:
@@ -524,11 +532,13 @@ static int magicmouse_raw_event(struct hid_device *hdev,
 			return 0;
 		}
 
-		/* Extract movement for scroll_while_moving. */
+		/* Extract movement and clicks for scroll tracking. */
 		x = (int)(((data[3] & 0x0c) << 28) | (data[1] << 22)) >> 22;
 		y = (int)(((data[3] & 0x30) << 26) | (data[2] << 22)) >> 22;
 		msc->delta_x = x;
 		msc->delta_y = y;
+		clicks = data[3];
+		msc->button_down = !!(clicks & 3);
 
 		msc->ntouches = 0;
 		for (ii = 0; ii < npoints; ii++)
@@ -537,10 +547,8 @@ static int magicmouse_raw_event(struct hid_device *hdev,
 		/* When emulating three-button mode, it is important
 		 * to have the current touch information before
 		 * generating a click event.
-		 */
-		clicks = data[3];
-
-		/* The following bits provide a device specific timestamp. They
+		 *
+		 * The following bits provide a device specific timestamp. They
 		 * are unused here.
 		 *
 		 * ts = data[3] >> 6 | data[4] << 2 | data[5] << 10;
@@ -557,11 +565,13 @@ static int magicmouse_raw_event(struct hid_device *hdev,
 			return 0;
 		}
 
-		/* Extract movement for scroll_while_moving. */
+		/* Extract movement and clicks for scroll tracking. */
 		x = (int)((data[3] << 24) | (data[2] << 16)) >> 16;
 		y = (int)((data[5] << 24) | (data[4] << 16)) >> 16;
 		msc->delta_x = x;
 		msc->delta_y = y;
+		clicks = data[1];
+		msc->button_down = !!(clicks & 3);
 
 		msc->ntouches = 0;
 		for (ii = 0; ii < npoints; ii++)
@@ -570,10 +580,8 @@ static int magicmouse_raw_event(struct hid_device *hdev,
 		/* When emulating three-button mode, it is important
 		 * to have the current touch information before
 		 * generating a click event.
-		 */
-		clicks = data[1];
-
-		/* The following bits provide a device specific timestamp. They
+		 *
+		 * The following bits provide a device specific timestamp. They
 		 * are unused here.
 		 *
 		 * ts = data[11] >> 6 | data[12] << 2 | data[13] << 10;
