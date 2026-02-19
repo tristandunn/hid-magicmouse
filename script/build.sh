@@ -43,4 +43,6 @@ PACKAGE_VERSION="${VERSION}"
 BUILT_MODULE_NAME="hid_magicmouse"
 DEST_MODULE_LOCATION="/kernel/drivers/hid"
 AUTOINSTALL="yes"
+MAKE[0]="make -C /lib/modules/\${kernelver}/build M=\${dkms_tree}/\${PACKAGE_NAME}/\${PACKAGE_VERSION}/build modules"
+CLEAN="make -C /lib/modules/\${kernelver}/build M=\${dkms_tree}/\${PACKAGE_NAME}/\${PACKAGE_VERSION}/build clean"
 EOF

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Prevent scrolling when a button is held.
+- Fix DKMS module rebuild to target the correct kernel version.
 
 ## 0.2.0 — February 13th, 2026
 
