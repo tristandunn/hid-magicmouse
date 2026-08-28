@@ -13,6 +13,9 @@ people migrating from macOS.
 > [!NOTE]
 > Currently only tested on Arch Linux.
 
+Building needs `git`, `curl`, `patch`, and `dkms`, plus network access to
+download the upstream source.
+
 To build and install the driver, including dependencies, you can run:
 
 ```sh
@@ -63,37 +66,71 @@ Available parameters:
 
 ## Patches
 
-This project applies patches to the upstream Linux `hid-magicmouse.c` driver. To
-ensure patches are only applied to the exact source version they were created
-for, the build process will:
+This project applies a series of patches to the upstream Linux
+`hid-magicmouse.c` driver, one patch per feature.
 
-1. Download the latest `hid-magicmouse.c` from the Linux kernel repository.
-2. Compute the MD5 hash of the downloaded file.
-3. Look for a matching patch in `patches/<md5>/hid-magicmouse.patch`.
-4. Apply the patch only if a matching version exists.
+```
+patches/
+  base/hid-magicmouse.c   Upstream source the series is written against.
+  base/version            Kernel tag that source came from.
+  verified                Upstream versions known to apply cleanly.
+  0001-*.patch            One patch per feature, applied in order.
+```
 
-This prevents patches from being applied to incompatible source versions.
+The build downloads the upstream `hid-magicmouse.c` for the kernel version it is
+building against and merges the series onto it. Line shifts and unrelated
+upstream edits are absorbed automatically. Only a change to the same lines a
+patch touches needs attention. DKMS repeats this for each kernel it builds. If
+the download or merge fails it reuses the last working source, so an upgrade
+never leaves you without a driver.
 
-### Creating a New Patch
+A series works on any kernel it still merges onto, which is usually a range of
+releases. Kernels older than the base generally fail, since the driver uses APIs
+they do not have.
 
-When the upstream driver changes, you'll need to create a new patch:
+```sh
+make status                                 # The current kernel.
+make status KERNEL=7.2.1-arch1-1            # Any other kernel.
+make verify KERNEL=7.1.10-arch1-1           # Record one that merges.
+```
 
-1. Download the new source and create the patch directory:
+### Updating for a New Kernel
 
-   ```sh
-   ./script/patches.sh download
-   ```
+When the merge can no longer resolve an upstream change, replay the series onto
+the new source:
 
-   This downloads the current `hid-magicmouse.c`, computes its MD5, and creates
-   `patches/<md5>/original.c` and `patches/<md5>/modified.c`.
-2. Edit `patches/<md5>/modified.c` with your changes.
-3. Generate the patch file:
+```sh
+make rebase
+```
 
-   ```sh
-   ./script/patches.sh build patches/<md5>
-   ```
+Each patch is rebased in turn inside a scratch git repository at `.work/`. A
+conflict is attributed to the single patch that caused it, and is resolved with
+the usual git tools:
 
-   This creates `patches/<md5>/hid-magicmouse.patch` from the diff between `original.c` and `modified.c`.
+```sh
+git -C .work/repo add hid-magicmouse.c
+git -C .work/repo rebase --continue
+```
+
+Then write the series back:
+
+```sh
+make export
+```
+
+Some upstream changes cannot be reconciled at all. Tag a release before
+rebasing so anyone on an older kernel can still build it, then bump the
+version.
+
+### Changing the Driver
+
+Edit a patch by rebasing onto the current base and amending its commit:
+
+```sh
+make rebase
+git -C .work/repo rebase -i upstream
+make export
+```
 
 ## License
 

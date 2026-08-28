@@ -15,7 +15,6 @@
 #include <linux/hid.h>
 #include <linux/input/mt.h>
 #include <linux/module.h>
-#include <linux/power_supply.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
 
@@ -52,14 +51,6 @@ static bool report_undeciphered;
 module_param(report_undeciphered, bool, 0644);
 MODULE_PARM_DESC(report_undeciphered, "Report undeciphered multi-touch state field using a MSC_RAW event");
 
-static bool scroll_while_moving = false;
-module_param(scroll_while_moving, bool, 0644);
-MODULE_PARM_DESC(scroll_while_moving, "Enable scrolling when the mouse is moving");
-
-static bool scroll_while_clicking = false;
-module_param(scroll_while_clicking, bool, 0644);
-MODULE_PARM_DESC(scroll_while_clicking, "Enable scrolling when a button is held");
-
 #define TRACKPAD2_2021_BT_VERSION 0x110
 #define TRACKPAD_2024_BT_VERSION 0x314
 
@@ -69,8 +60,7 @@ MODULE_PARM_DESC(scroll_while_clicking, "Enable scrolling when a button is held"
 #define MOUSE_REPORT_ID    0x29
 #define MOUSE2_REPORT_ID   0x12
 #define DOUBLE_REPORT_ID   0xf7
-#define BATTERY_REPORT_ID  0x90
-#define BATTERY_POLL_INTERVAL_SEC 60
+#define USB_BATTERY_TIMEOUT_SEC 60
 
 /* These definitions are not precise, but they're close enough.  (Bits
  * 0x03 seem to indicate the aspect ratio of the touch, bits 0x70 seem
@@ -88,7 +78,6 @@ MODULE_PARM_DESC(scroll_while_clicking, "Enable scrolling when a button is held"
 #define SCROLL_HR_MULT (120 / SCROLL_HR_STEPS)
 #define SCROLL_HR_THRESHOLD 90 /* units */
 #define SCROLL_ACCEL_DEFAULT 7
-#define SCROLL_ACCEL_MIN 3
 
 /* Touch surface information. Dimension is in hundredths of a mm, min and max
  * are in units. */
@@ -134,11 +123,7 @@ MODULE_PARM_DESC(scroll_while_clicking, "Enable scrolling when a button is held"
  * @tracking_ids: Mapping of current touch input data to @touches.
  * @hdev: Pointer to the underlying HID device.
  * @work: Workqueue to handle initialization retry for quirky devices.
- * @battery_timer: Timer for obtaining battery level over USB.
- * @bt_battery_work: Delayed work for polling battery level over Bluetooth.
- * @battery_capacity: Cached battery percentage from report 0x90.
- * @battery_status: Cached charge status from report 0x90.
- * @battery_received: True once a battery report has been received.
+ * @battery_timer: Timer for obtaining battery level information.
  */
 struct magicmouse_sc {
 	struct input_dev *input;
@@ -147,9 +132,6 @@ struct magicmouse_sc {
 	int ntouches;
 	int scroll_accel;
 	unsigned long scroll_jiffies;
-	int delta_x;
-	int delta_y;
-	bool button_down;
 
 	struct {
 		short x;
@@ -167,10 +149,6 @@ struct magicmouse_sc {
 	struct hid_device *hdev;
 	struct delayed_work work;
 	struct timer_list battery_timer;
-	struct delayed_work bt_battery_work;
-	int battery_capacity;
-	int battery_status;
-	bool battery_received;
 };
 
 static int magicmouse_firm_touch(struct magicmouse_sc *msc)
@@ -283,12 +261,9 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id, u8 *tda
 	msc->touches[id].size = size;
 
 	/* If requested, emulate a scroll wheel by detecting small
-	 * vertical touch motions. Skip when the mouse is moving or a
-	 * button is held, unless the corresponding option is enabled.
+	 * vertical touch motions.
 	 */
 	if (emulate_scroll_wheel &&
-	    (scroll_while_moving || !(msc->delta_x || msc->delta_y)) &&
-	    (scroll_while_clicking || !msc->button_down) &&
 	    input->id.product != USB_DEVICE_ID_APPLE_MAGICTRACKPAD2 &&
 	    input->id.product != USB_DEVICE_ID_APPLE_MAGICTRACKPAD2_USBC) {
 		unsigned long now = jiffies;
@@ -316,8 +291,7 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id, u8 *tda
 			if (scroll_acceleration && time_before(now,
 						msc->scroll_jiffies + HZ / 2))
 				msc->scroll_accel = max_t(int,
-						msc->scroll_accel - 1,
-						SCROLL_ACCEL_MIN);
+						msc->scroll_accel - 1, 1);
 			else
 				msc->scroll_accel = SCROLL_ACCEL_DEFAULT;
 
@@ -374,17 +348,6 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id, u8 *tda
 			}
 			break;
 		}
-	} else if (emulate_scroll_wheel &&
-		   ((!scroll_while_moving && (msc->delta_x || msc->delta_y)) ||
-		    (!scroll_while_clicking && msc->button_down))) {
-		/* Reset scroll tracking when scrolling is suppressed to prevent jumps. */
-		msc->touches[id].scroll_x = x;
-		msc->touches[id].scroll_y = y;
-		msc->touches[id].scroll_x_hr = x;
-		msc->touches[id].scroll_y_hr = y;
-		msc->touches[id].scroll_x_active = false;
-		msc->touches[id].scroll_y_active = false;
-		msc->scroll_accel = SCROLL_ACCEL_DEFAULT;
 	}
 
 	if (down)
@@ -420,66 +383,16 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id, u8 *tda
 	}
 }
 
-static void magicmouse_update_battery(struct magicmouse_sc *msc,
-				      u8 *data, int size)
-{
-	/* Report 0x90 format:
-	 *   data[0] = report ID (0x90)
-	 *   data[1] = flags: bit 0 = Good, bit 1 = Charging, bit 2 = FullyCharged
-	 *   data[2] = AbsoluteStateOfCharge (0-100 percentage)
-	 */
-	if (size < 3)
-		return;
-
-	msc->battery_capacity = data[2];
-
-	if (data[1] & BIT(2))
-		msc->battery_status = POWER_SUPPLY_STATUS_FULL;
-	else if (data[1] & BIT(1))
-		msc->battery_status = POWER_SUPPLY_STATUS_CHARGING;
-	else
-		msc->battery_status = POWER_SUPPLY_STATUS_DISCHARGING;
-
-	msc->battery_received = true;
-
-#ifdef CONFIG_HID_BATTERY_STRENGTH
-	if (msc->hdev->battery) {
-		msc->hdev->battery_capacity = msc->battery_capacity;
-		msc->hdev->battery_charge_status = msc->battery_status;
-		msc->hdev->battery_status = HID_BATTERY_REPORTED;
-		msc->hdev->battery_avoid_query = true;
-		power_supply_changed(msc->hdev->battery);
-	}
-#endif
-}
-
-static int magicmouse_raw_event(struct hid_device *hdev,
-		struct hid_report *report, u8 *data, int size)
+static int __magicmouse_raw_event(struct hid_device *hdev,
+		struct hid_report *report, u8 *data, int size, bool nested)
 {
 	struct magicmouse_sc *msc = hid_get_drvdata(hdev);
-	struct input_dev *input;
+	struct input_dev *input = msc->input;
 	int x = 0, y = 0, ii, clicks = 0, npoints;
 
-	/* Handle battery report before input device check — this report
-	 * can arrive during hid_hw_start() before input is registered.
-	 * Return negative to prevent hid_report_raw_event from processing
-	 * fields: returning 1 is not sufficient as the kernel only skips
-	 * field processing for ret < 0.  Without this, the HID core's
-	 * battery handler overwrites the values we set here.
-	 */
-	if (data[0] == BATTERY_REPORT_ID) {
-		magicmouse_update_battery(msc, data, size);
-		return -1;
-	}
-
-	input = msc->input;
-	if (!input)
+	/* Protect against zero sized recursive calls from DOUBLE_REPORT_ID */
+	if (size < 1)
 		return 0;
-
-	/* Clear movement delta and click state for scroll tracking. */
-	msc->delta_x = 0;
-	msc->delta_y = 0;
-	msc->button_down = false;
 
 	switch (data[0]) {
 	case TRACKPAD_REPORT_ID:
@@ -531,15 +444,6 @@ static int magicmouse_raw_event(struct hid_device *hdev,
 					size);
 			return 0;
 		}
-
-		/* Extract movement and clicks for scroll tracking. */
-		x = (int)(((data[3] & 0x0c) << 28) | (data[1] << 22)) >> 22;
-		y = (int)(((data[3] & 0x30) << 26) | (data[2] << 22)) >> 22;
-		msc->delta_x = x;
-		msc->delta_y = y;
-		clicks = data[3];
-		msc->button_down = !!(clicks & 3);
-
 		msc->ntouches = 0;
 		for (ii = 0; ii < npoints; ii++)
 			magicmouse_emit_touch(msc, ii, data + ii * 8 + 6);
@@ -547,8 +451,12 @@ static int magicmouse_raw_event(struct hid_device *hdev,
 		/* When emulating three-button mode, it is important
 		 * to have the current touch information before
 		 * generating a click event.
-		 *
-		 * The following bits provide a device specific timestamp. They
+		 */
+		x = (int)(((data[3] & 0x0c) << 28) | (data[1] << 22)) >> 22;
+		y = (int)(((data[3] & 0x30) << 26) | (data[2] << 22)) >> 22;
+		clicks = data[3];
+
+		/* The following bits provide a device specific timestamp. They
 		 * are unused here.
 		 *
 		 * ts = data[3] >> 6 | data[4] << 2 | data[5] << 10;
@@ -564,15 +472,6 @@ static int magicmouse_raw_event(struct hid_device *hdev,
 					size);
 			return 0;
 		}
-
-		/* Extract movement and clicks for scroll tracking. */
-		x = (int)((data[3] << 24) | (data[2] << 16)) >> 16;
-		y = (int)((data[5] << 24) | (data[4] << 16)) >> 16;
-		msc->delta_x = x;
-		msc->delta_y = y;
-		clicks = data[1];
-		msc->button_down = !!(clicks & 3);
-
 		msc->ntouches = 0;
 		for (ii = 0; ii < npoints; ii++)
 			magicmouse_emit_touch(msc, ii, data + ii * 8 + 14);
@@ -580,8 +479,12 @@ static int magicmouse_raw_event(struct hid_device *hdev,
 		/* When emulating three-button mode, it is important
 		 * to have the current touch information before
 		 * generating a click event.
-		 *
-		 * The following bits provide a device specific timestamp. They
+		 */
+		x = (int)((data[3] << 24) | (data[2] << 16)) >> 16;
+		y = (int)((data[5] << 24) | (data[4] << 16)) >> 16;
+		clicks = data[1];
+
+		/* The following bits provide a device specific timestamp. They
 		 * are unused here.
 		 *
 		 * ts = data[11] >> 6 | data[12] << 2 | data[13] << 10;
@@ -591,9 +494,30 @@ static int magicmouse_raw_event(struct hid_device *hdev,
 		/* Sometimes the trackpad sends two touch reports in one
 		 * packet.
 		 */
-		magicmouse_raw_event(hdev, report, data + 2, data[1]);
-		magicmouse_raw_event(hdev, report, data + 2 + data[1],
-			size - 2 - data[1]);
+
+		/*
+		 * A double report only ever wraps two normal reports, so it is
+		 * never nested. Refuse to recurse a second time; otherwise a
+		 * malicious device could chain DOUBLE_REPORT_ID packets to drive
+		 * unbounded recursion and overflow the kernel stack.
+		 */
+		if (nested)
+			return 0;
+
+		/* Ensure that we have at least 2 elements (report type and size) */
+		if (size < 2)
+			return 0;
+
+		if (size < data[1] + 2) {
+			hid_warn(hdev,
+				 "received report length (%d) was smaller than specified (%d)",
+				 size, data[1] + 2);
+			return 0;
+		}
+
+		__magicmouse_raw_event(hdev, report, data + 2, data[1], true);
+		__magicmouse_raw_event(hdev, report, data + 2 + data[1],
+			size - 2 - data[1], true);
 		return 0;
 	default:
 		return 0;
@@ -619,20 +543,16 @@ static int magicmouse_raw_event(struct hid_device *hdev,
 	return 1;
 }
 
+static int magicmouse_raw_event(struct hid_device *hdev,
+		struct hid_report *report, u8 *data, int size)
+{
+	return __magicmouse_raw_event(hdev, report, data, size, false);
+}
+
 static int magicmouse_event(struct hid_device *hdev, struct hid_field *field,
 		struct hid_usage *usage, __s32 value)
 {
 	struct magicmouse_sc *msc = hid_get_drvdata(hdev);
-
-	/* Prevent the HID core's battery handler from overwriting the
-	 * battery values we set from report 0x90.  The report descriptor
-	 * contains battery usages that the kernel processes during normal
-	 * field evaluation, resetting battery_capacity to 0.
-	 */
-	if ((usage->hid & HID_USAGE_PAGE) == HID_UP_BATTERY ||
-	    usage->hid == HID_DG_BATTERYSTRENGTH)
-		return 1;
-
 	if ((msc->input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE2 ||
 	     msc->input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE2_USBC) &&
 	    field->report->id == MOUSE2_REPORT_ID) {
@@ -923,12 +843,10 @@ static bool is_usb_magictrackpad2(__u32 vendor, __u32 product)
 	       product == USB_DEVICE_ID_APPLE_MAGICTRACKPAD2_USBC;
 }
 
-static bool is_bt_magicmouse2(__u32 vendor, __u32 product)
+static bool is_bt_magictrackpad2(__u32 vendor, __u32 product)
 {
-	if (vendor != BT_VENDOR_ID_APPLE)
-		return false;
-	return product == USB_DEVICE_ID_APPLE_MAGICMOUSE2 ||
-	       product == USB_DEVICE_ID_APPLE_MAGICMOUSE2_USBC;
+	return vendor == BT_VENDOR_ID_APPLE &&
+	       product == USB_DEVICE_ID_APPLE_MAGICTRACKPAD2_USBC;
 }
 
 static int magicmouse_fetch_battery(struct hid_device *hdev)
@@ -936,19 +854,22 @@ static int magicmouse_fetch_battery(struct hid_device *hdev)
 #ifdef CONFIG_HID_BATTERY_STRENGTH
 	struct hid_report_enum *report_enum;
 	struct hid_report *report;
+	struct hid_battery *bat;
 
-	if (!hdev->battery ||
+	bat = hid_get_battery(hdev);
+	if (!bat ||
 	    (!is_usb_magicmouse2(hdev->vendor, hdev->product) &&
-	     !is_usb_magictrackpad2(hdev->vendor, hdev->product)))
+	     !is_usb_magictrackpad2(hdev->vendor, hdev->product) &&
+	     !is_bt_magictrackpad2(hdev->vendor, hdev->product)))
 		return -1;
 
-	report_enum = &hdev->report_enum[hdev->battery_report_type];
-	report = report_enum->report_id_hash[hdev->battery_report_id];
+	report_enum = &hdev->report_enum[bat->report_type];
+	report = report_enum->report_id_hash[bat->report_id];
 
 	if (!report || report->maxfield < 1)
 		return -1;
 
-	if (hdev->battery_capacity == hdev->battery_max)
+	if (bat->capacity == bat->max)
 		return -1;
 
 	hid_hw_request(hdev, report, HID_REQ_GET_REPORT);
@@ -965,47 +886,8 @@ static void magicmouse_battery_timer_tick(struct timer_list *t)
 
 	if (magicmouse_fetch_battery(hdev) == 0) {
 		mod_timer(&msc->battery_timer,
-			  jiffies + secs_to_jiffies(BATTERY_POLL_INTERVAL_SEC));
+			  jiffies + secs_to_jiffies(USB_BATTERY_TIMEOUT_SEC));
 	}
-}
-
-static void magicmouse_fetch_bt_battery(struct hid_device *hdev)
-{
-#ifdef CONFIG_HID_BATTERY_STRENGTH
-	struct magicmouse_sc *msc = hid_get_drvdata(hdev);
-	struct hid_report_enum *report_enum =
-		&hdev->report_enum[HID_INPUT_REPORT];
-	struct hid_report *report =
-		report_enum->report_id_hash[BATTERY_REPORT_ID];
-	u32 len;
-	u8 *buf;
-	int ret;
-
-	if (!hdev->battery || !report)
-		return;
-
-	len = hid_report_len(report);
-	buf = kzalloc(len, GFP_KERNEL);
-	if (!buf)
-		return;
-
-	ret = hid_hw_raw_request(hdev, BATTERY_REPORT_ID, buf, len,
-				 HID_INPUT_REPORT, HID_REQ_GET_REPORT);
-	if (ret >= 3)
-		magicmouse_update_battery(msc, buf, ret);
-
-	kfree(buf);
-#endif
-}
-
-static void magicmouse_bt_battery_work_tick(struct work_struct *work)
-{
-	struct magicmouse_sc *msc =
-		container_of(work, struct magicmouse_sc, bt_battery_work.work);
-
-	magicmouse_fetch_bt_battery(msc->hdev);
-	schedule_delayed_work(&msc->bt_battery_work,
-			      secs_to_jiffies(BATTERY_POLL_INTERVAL_SEC));
 }
 
 static int magicmouse_probe(struct hid_device *hdev,
@@ -1034,60 +916,29 @@ static int magicmouse_probe(struct hid_device *hdev,
 		return ret;
 	}
 
-	/* Release the driver input lock early so that battery report 0x90,
-	 * which Bluetooth devices send once at connection and never repeat,
-	 * can be received by raw_event during hid_hw_start(). Without this,
-	 * the report is silently dropped by down_trylock in hid_input_report
-	 * because probe holds the lock for its entire duration.
-	 */
-	hid_device_io_start(hdev);
-
 	ret = hid_hw_start(hdev, HID_CONNECT_DEFAULT);
 	if (ret) {
 		hid_err(hdev, "magicmouse hw start failed\n");
 		return ret;
 	}
 
+	/*
+	 * When hidinput_connect() fails it frees every input device it
+	 * created, but that does not fail hid_hw_start(): the core simply
+	 * does not claim an input. msc->input, cached in ->input_mapping
+	 * while the report descriptor was parsed, would then be a dangling
+	 * pointer that passes every NULL check. Trust the core's claim.
+	 */
+	if (!(hdev->claimed & HID_CLAIMED_INPUT))
+		msc->input = NULL;
+
 	if (is_usb_magicmouse2(id->vendor, id->product) ||
 	    is_usb_magictrackpad2(id->vendor, id->product)) {
 		timer_setup(&msc->battery_timer, magicmouse_battery_timer_tick, 0);
 		mod_timer(&msc->battery_timer,
-			  jiffies + secs_to_jiffies(BATTERY_POLL_INTERVAL_SEC));
+			  jiffies + secs_to_jiffies(USB_BATTERY_TIMEOUT_SEC));
 		magicmouse_fetch_battery(hdev);
 	}
-
-#ifdef CONFIG_HID_BATTERY_STRENGTH
-	if (is_bt_magicmouse2(id->vendor, id->product)) {
-		INIT_DELAYED_WORK(&msc->bt_battery_work,
-				  magicmouse_bt_battery_work_tick);
-		schedule_delayed_work(&msc->bt_battery_work,
-				      secs_to_jiffies(BATTERY_POLL_INTERVAL_SEC));
-	}
-
-	/* Prevent the kernel from querying a FEATURE report for battery.
-	 * The device reports battery via INPUT report 0x90 which we handle
-	 * ourselves.  The kernel's query path requests a different report
-	 * whose field values (0) overwrite the capacity we set.
-	 */
-	if (hdev->battery)
-		hdev->battery_avoid_query = true;
-
-	if (msc->battery_received && hdev->battery) {
-		/* Battery report arrived during hid_hw_start() — apply it
-		 * now that the power_supply is registered.
-		 */
-		hdev->battery_capacity = msc->battery_capacity;
-		hdev->battery_charge_status = msc->battery_status;
-		hdev->battery_status = HID_BATTERY_REPORTED;
-		power_supply_changed(hdev->battery);
-	} else if (!msc->battery_received && hdev->battery) {
-		/* Battery report was not received during hid_hw_start(),
-		 * e.g. the device had not yet sent it.  Request it
-		 * explicitly now that probe is finishing.
-		 */
-		magicmouse_fetch_bt_battery(hdev);
-	}
-#endif
 
 	if (is_usb_magicmouse2(id->vendor, id->product) ||
 	    (is_usb_magictrackpad2(id->vendor, id->product) &&
@@ -1152,15 +1003,21 @@ static int magicmouse_probe(struct hid_device *hdev,
 		schedule_delayed_work(&msc->work, msecs_to_jiffies(500));
 	}
 
+	/*
+	 * Query the Bluetooth Magic Trackpad USB-C battery as done for USB.
+	 * Start io first: probe holds driver_input_lock and the synchronous
+	 * GET_REPORT reply would otherwise be dropped.
+	 */
+	if (is_bt_magictrackpad2(id->vendor, id->product)) {
+		hid_device_io_start(hdev);
+		magicmouse_fetch_battery(hdev);
+	}
+
 	return 0;
 err_stop_hw:
 	if (is_usb_magicmouse2(id->vendor, id->product) ||
 	    is_usb_magictrackpad2(id->vendor, id->product))
 		timer_delete_sync(&msc->battery_timer);
-#ifdef CONFIG_HID_BATTERY_STRENGTH
-	if (is_bt_magicmouse2(id->vendor, id->product))
-		cancel_delayed_work_sync(&msc->bt_battery_work);
-#endif
 
 	hid_hw_stop(hdev);
 	return ret;
@@ -1175,14 +1032,26 @@ static void magicmouse_remove(struct hid_device *hdev)
 		if (is_usb_magicmouse2(hdev->vendor, hdev->product) ||
 		    is_usb_magictrackpad2(hdev->vendor, hdev->product))
 			timer_delete_sync(&msc->battery_timer);
-#ifdef CONFIG_HID_BATTERY_STRENGTH
-		if (is_bt_magicmouse2(hdev->vendor, hdev->product))
-			cancel_delayed_work_sync(&msc->bt_battery_work);
-#endif
 	}
 
 	hid_hw_stop(hdev);
 }
+
+#ifdef CONFIG_PM
+static int magicmouse_reset_resume(struct hid_device *hdev)
+{
+	struct magicmouse_sc *msc = hid_get_drvdata(hdev);
+
+	/* The device drops out of multitouch mode on resume; re-send the
+	 * enable report.  Only the HID_TYPE_USBMOUSE interface accepts it, and
+	 * it must be deferred. Sending it inline here is too early.
+	 */
+	if (msc && hdev->type == HID_TYPE_USBMOUSE)
+		schedule_delayed_work(&msc->work, msecs_to_jiffies(500));
+
+	return 0;
+}
+#endif
 
 static const __u8 *magicmouse_report_fixup(struct hid_device *hdev, __u8 *rdesc,
 					   unsigned int *rsize)
@@ -1197,13 +1066,11 @@ static const __u8 *magicmouse_report_fixup(struct hid_device *hdev, __u8 *rdesc,
 	 */
 	if ((is_usb_magicmouse2(hdev->vendor, hdev->product) ||
 	     is_usb_magictrackpad2(hdev->vendor, hdev->product)) &&
-	    *rsize == 83 && rdesc[46] == 0x84 && rdesc[58] == 0x85) {
+	    *rsize >= 83 && rdesc[46] == 0x84 && rdesc[58] == 0x85) {
 		hid_info(hdev,
 			 "fixing up magicmouse battery report descriptor\n");
 		*rsize = *rsize - 1;
-		rdesc = kmemdup(rdesc + 1, *rsize, GFP_KERNEL);
-		if (!rdesc)
-			return NULL;
+		rdesc = rdesc + 1;
 
 		rdesc[0] = 0x05;
 		rdesc[1] = 0x01;
@@ -1249,6 +1116,9 @@ static struct hid_driver magicmouse_driver = {
 	.event = magicmouse_event,
 	.input_mapping = magicmouse_input_mapping,
 	.input_configured = magicmouse_input_configured,
+#ifdef CONFIG_PM
+	.reset_resume = magicmouse_reset_resume,
+#endif
 };
 module_hid_driver(magicmouse_driver);
 

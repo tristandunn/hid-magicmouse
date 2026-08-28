@@ -2,46 +2,39 @@
 
 set -eou pipefail
 
-VERSION=$(cat "$(dirname "$0")/../VERSION")
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+VERSION=$(cat "${ROOT}/VERSION")
 
-# Fetch the source files.
-mkdir -p ./source
-curl -sS -o ./source/hid_magicmouse.c \
-	https://raw.githubusercontent.com/torvalds/linux/master/drivers/hid/hid-magicmouse.c
-curl -sS -o ./source/hid-ids.h \
-	https://raw.githubusercontent.com/torvalds/linux/master/drivers/hid/hid-ids.h
-
-# Determine the patch file based on MD5 of the source.
-MD5=$(md5sum ./source/hid_magicmouse.c | cut -d' ' -f1)
-PATCH_FILE="patches/${MD5}/hid-magicmouse.patch"
-
-if [[ ! -f "$PATCH_FILE" ]]; then
-	echo "Error: No patch file found. (Expected: ${PATCH_FILE})" >&2
-	exit 1
-fi
-
-# Apply the patch.
-patch -s ./source/hid_magicmouse.c "$PATCH_FILE"
+# Fetch the upstream source for this kernel and apply the patch series.
+"${ROOT}/script/source.sh" "$@"
 
 # Create the Makefile.
-cat << 'EOF' | tee ./source/Makefile > /dev/null
+cat << 'EOF' | tee "${ROOT}/source/Makefile" > /dev/null
 obj-m := hid_magicmouse.o
 
 KVERSION := $(shell uname -r)
 
 all:
-	make -C /lib/modules/$(KVERSION)/build M=$(PWD) modules
+	make -C /lib/modules/$(KVERSION)/build M=$(CURDIR) modules
 
 clean:
-	make -C /lib/modules/$(KVERSION)/build M=$(PWD) clean
+	make -C /lib/modules/$(KVERSION)/build M=$(CURDIR) clean
 EOF
 
 # Create the DKMS configuration.
-cat << EOF | tee ./source/dkms.conf > /dev/null
+#
+# PRE_BUILD re-runs the source pipeline for the kernel being built, so a kernel
+# upgrade compiles the driver for that kernel instead of the one installed
+# against. It falls back to the source already present when the upstream file
+# cannot be fetched or merged, so an upgrade never leaves the mouse without a
+# driver. SOURCE_DIR is the build directory itself, since DKMS flattens the
+# source files, and the cache lives outside it so it survives a rebuild.
+cat << EOF | tee "${ROOT}/source/dkms.conf" > /dev/null
 PACKAGE_NAME="hid-magicmouse-custom"
 PACKAGE_VERSION="${VERSION}"
 BUILT_MODULE_NAME="hid_magicmouse"
 DEST_MODULE_LOCATION="/kernel/drivers/hid"
 AUTOINSTALL="yes"
+PRE_BUILD="env SOURCE_DIR=. CACHE_DIR=/var/cache/hid-magicmouse-custom script/source.sh --allow-fallback \${kernelver}"
 MAKE[0]="make -C /lib/modules/\${kernelver}/build M=\${dkms_tree}/\${PACKAGE_NAME}/\${PACKAGE_VERSION}/build modules"
 EOF

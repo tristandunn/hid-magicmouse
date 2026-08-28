@@ -2,13 +2,24 @@
 
 set -eou pipefail
 
-VERSION=$(cat "$(dirname "$0")/../VERSION")
+# Remove every registered version, so bumping the version cannot leave an older
+# one orphaned and still autoinstalling.
+for source in /usr/src/hid-magicmouse-custom-*; do
+  if [ ! -d "${source}" ]; then
+    continue
+  fi
 
-# Remove the DKMS driver.
-sudo dkms remove -m hid-magicmouse-custom -v ${VERSION} --all 2>/dev/null || true
+  previous="${source##*/hid-magicmouse-custom-}"
 
-# Remove the source directory.
-sudo rm -rf /usr/src/hid-magicmouse-custom-${VERSION}
+  if ! sudo dkms remove -m hid-magicmouse-custom -v "${previous}" --all 2> /dev/null; then
+    echo "No DKMS module registered for version ${previous}."
+  fi
+
+  sudo rm -rf "${source}"
+done
+
+# Remove the upstream source cache.
+sudo rm -rf /var/cache/hid-magicmouse-custom
 
 # Remove configuration files.
 sudo rm -f /etc/modules-load.d/hid-magicmouse.conf

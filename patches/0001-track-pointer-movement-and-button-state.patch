@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tristan Dunn <hello@tristandunn.com>
+Date: Thu, 27 Aug 2026 19:32:10 -0400
+Subject: Track pointer movement and button state.
+
+Record the pointer delta and button state from each mouse report so that
+scroll handling can tell whether the mouse is being moved or held down.
+
+The movement and click extraction moves ahead of the touch emission loop
+because magicmouse_emit_touch() consumes the state this records.
+---
+ hid-magicmouse.c | 42 ++++++++++++++++++++++++++++++------------
+ 1 file changed, 30 insertions(+), 12 deletions(-)
+
+diff --git a/hid-magicmouse.c b/hid-magicmouse.c
+index d637c04..915b5f5 100644
+--- a/hid-magicmouse.c
++++ b/hid-magicmouse.c
+@@ -132,6 +132,9 @@ struct magicmouse_sc {
+ 	int ntouches;
+ 	int scroll_accel;
+ 	unsigned long scroll_jiffies;
++	int delta_x;
++	int delta_y;
++	bool button_down;
+ 
+ 	struct {
+ 		short x;
+@@ -394,6 +397,11 @@ static int __magicmouse_raw_event(struct hid_device *hdev,
+ 	if (size < 1)
+ 		return 0;
+ 
++	/* Clear movement delta and click state for scroll tracking. */
++	msc->delta_x = 0;
++	msc->delta_y = 0;
++	msc->button_down = false;
++
+ 	switch (data[0]) {
+ 	case TRACKPAD_REPORT_ID:
+ 	case TRACKPAD2_BT_REPORT_ID:
+@@ -444,6 +452,15 @@ static int __magicmouse_raw_event(struct hid_device *hdev,
+ 					size);
+ 			return 0;
+ 		}
++
++		/* Extract movement and clicks for scroll tracking. */
++		x = (int)(((data[3] & 0x0c) << 28) | (data[1] << 22)) >> 22;
++		y = (int)(((data[3] & 0x30) << 26) | (data[2] << 22)) >> 22;
++		msc->delta_x = x;
++		msc->delta_y = y;
++		clicks = data[3];
++		msc->button_down = !!(clicks & 3);
++
+ 		msc->ntouches = 0;
+ 		for (ii = 0; ii < npoints; ii++)
+ 			magicmouse_emit_touch(msc, ii, data + ii * 8 + 6);
+@@ -451,12 +468,8 @@ static int __magicmouse_raw_event(struct hid_device *hdev,
+ 		/* When emulating three-button mode, it is important
+ 		 * to have the current touch information before
+ 		 * generating a click event.
+-		 */
+-		x = (int)(((data[3] & 0x0c) << 28) | (data[1] << 22)) >> 22;
+-		y = (int)(((data[3] & 0x30) << 26) | (data[2] << 22)) >> 22;
+-		clicks = data[3];
+-
+-		/* The following bits provide a device specific timestamp. They
++		 *
++		 * The following bits provide a device specific timestamp. They
+ 		 * are unused here.
+ 		 *
+ 		 * ts = data[3] >> 6 | data[4] << 2 | data[5] << 10;
+@@ -472,6 +485,15 @@ static int __magicmouse_raw_event(struct hid_device *hdev,
+ 					size);
+ 			return 0;
+ 		}
++
++		/* Extract movement and clicks for scroll tracking. */
++		x = (int)((data[3] << 24) | (data[2] << 16)) >> 16;
++		y = (int)((data[5] << 24) | (data[4] << 16)) >> 16;
++		msc->delta_x = x;
++		msc->delta_y = y;
++		clicks = data[1];
++		msc->button_down = !!(clicks & 3);
++
+ 		msc->ntouches = 0;
+ 		for (ii = 0; ii < npoints; ii++)
+ 			magicmouse_emit_touch(msc, ii, data + ii * 8 + 14);
+@@ -479,12 +501,8 @@ static int __magicmouse_raw_event(struct hid_device *hdev,
+ 		/* When emulating three-button mode, it is important
+ 		 * to have the current touch information before
+ 		 * generating a click event.
+-		 */
+-		x = (int)((data[3] << 24) | (data[2] << 16)) >> 16;
+-		y = (int)((data[5] << 24) | (data[4] << 16)) >> 16;
+-		clicks = data[1];
+-
+-		/* The following bits provide a device specific timestamp. They
++		 *
++		 * The following bits provide a device specific timestamp. They
+ 		 * are unused here.
+ 		 *
+ 		 * ts = data[11] >> 6 | data[12] << 2 | data[13] << 10;

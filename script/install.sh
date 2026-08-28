@@ -2,25 +2,46 @@
 
 set -eou pipefail
 
-VERSION=$(cat "$(dirname "$0")/../VERSION")
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+VERSION=$(cat "${ROOT}/VERSION")
 
-# Install dependencies.
-sudo pacman -S --needed dkms linux-headers
+# Remove every registered version, not just this one. Otherwise two versions of
+# the package would both autoinstall and fight over the same module.
+for source in /usr/src/hid-magicmouse-custom-*; do
+  if [ ! -d "${source}" ]; then
+    continue
+  fi
+
+  previous="${source##*/hid-magicmouse-custom-}"
+
+  if ! sudo dkms remove -m hid-magicmouse-custom -v "${previous}" --all 2> /dev/null; then
+    echo "No DKMS module registered for version ${previous}."
+  fi
+
+  sudo rm -rf "${source}"
+done
 
 # Create the source directory.
 sudo mkdir -p /usr/src/hid-magicmouse-custom-${VERSION}
 
-# Copy all source files.
-sudo cp ./source/* /usr/src/hid-magicmouse-custom-${VERSION}/
+# Copy the generated source files.
+sudo cp "${ROOT}"/source/{hid_magicmouse.c,hid-ids.h,Makefile,dkms.conf} \
+  /usr/src/hid-magicmouse-custom-${VERSION}/
 
-# Clear and register the driver.
-sudo dkms remove -m hid-magicmouse-custom -v ${VERSION} --all 2>/dev/null || true
+# Copy the patch series and tooling so DKMS can regenerate the source for
+# whichever kernel it is building against.
+sudo cp -r "${ROOT}/patches" /usr/src/hid-magicmouse-custom-${VERSION}/
+sudo mkdir -p /usr/src/hid-magicmouse-custom-${VERSION}/script
+sudo cp "${ROOT}/script/source.sh" /usr/src/hid-magicmouse-custom-${VERSION}/script/
+sudo mkdir -p /var/cache/hid-magicmouse-custom
+
+# Register the driver.
 sudo dkms build -m hid-magicmouse-custom -v ${VERSION}
 sudo dkms install -m hid-magicmouse-custom -v ${VERSION}
 
 # Create a default configuration if one doesn't exist.
 if [ ! -e /etc/modprobe.d/hid-magicmouse.conf ]; then
-  sudo cp ./config/hid-magicmouse.conf /etc/modprobe.d/hid-magicmouse.conf
+  sudo cp "${ROOT}/config/hid-magicmouse.conf" /etc/modprobe.d/hid-magicmouse.conf
 fi
 
 # Ensure the module loads at boot.

@@ -2,9 +2,9 @@
 
 ## Unreleased
 
+- Replace the per-version patches with a single patch series.
 - Prevent scrolling when a button is held.
 - Fix DKMS module rebuild to target the correct kernel version.
-- Generate patch for the latest file version.
 
 ## 0.2.0 — February 13th, 2026
 
