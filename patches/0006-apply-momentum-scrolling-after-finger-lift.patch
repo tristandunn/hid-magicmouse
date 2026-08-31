@@ -1,0 +1,234 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tristan Dunn <hello@tristandunn.com>
+Date: Thu, 27 Aug 2026 22:40:40 -0400
+Subject: Apply momentum scrolling after finger lift.
+
+Scrolling stops dead when the finger leaves the surface, which feels abrupt
+next to macOS. Seed a velocity from an EWMA of the emitted hi-res steps and
+decay it on a delayed work tick after lift.
+
+Momentum is suppressed when the scroll direction reversed during the gesture,
+and only starts above MOMENTUM_START_SCALED, so a slow or hesitant scroll does
+not drift. Add scroll_momentum to disable it.
+---
+ hid-magicmouse.c | 119 ++++++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 113 insertions(+), 6 deletions(-)
+
+diff --git a/hid-magicmouse.c b/hid-magicmouse.c
+index ffa8405..d146546 100644
+--- a/hid-magicmouse.c
++++ b/hid-magicmouse.c
+@@ -60,6 +60,10 @@ static bool scroll_while_clicking = false;
+ module_param(scroll_while_clicking, bool, 0644);
+ MODULE_PARM_DESC(scroll_while_clicking, "Enable scrolling when a button is held");
+ 
++static bool scroll_momentum = true;
++module_param(scroll_momentum, bool, 0644);
++MODULE_PARM_DESC(scroll_momentum, "Enables scroll momentum after finger lift (default: true)");
++
+ #define TRACKPAD2_2021_BT_VERSION 0x110
+ #define TRACKPAD_2024_BT_VERSION 0x314
+ 
+@@ -90,6 +94,15 @@ MODULE_PARM_DESC(scroll_while_clicking, "Enable scrolling when a button is held"
+ #define SCROLL_ACCEL_DEFAULT 7
+ #define SCROLL_ACCEL_MIN 3
+ 
++#define MOMENTUM_SCALE        256   /* Fixed-point scale for velocity */
++#define MOMENTUM_INTERVAL_MS  16    /* ~60 Hz tick interval */
++
++/* Velocity is tracked in the hi-res units that are emitted, so a single
++ * scroll step is SCROLL_HR_MULT units rather than one. */
++#define MOMENTUM_STEP_SCALED  (SCROLL_HR_MULT * MOMENTUM_SCALE)
++#define MOMENTUM_MIN_SCALED   (MOMENTUM_STEP_SCALED / 4)     /* Stop below a quarter step */
++#define MOMENTUM_START_SCALED (MOMENTUM_STEP_SCALED * 3 / 2) /* Start above one and a half steps */
++
+ /* Touch surface information. Dimension is in hundredths of a mm, min and max
+  * are in units. */
+ #define MOUSE_DIMENSION_X (float)9056
+@@ -139,6 +152,9 @@ MODULE_PARM_DESC(scroll_while_clicking, "Enable scrolling when a button is held"
+  * @battery_capacity: Cached battery percentage from report 0x90.
+  * @battery_status: Cached charge status from report 0x90.
+  * @battery_received: True once a battery report has been received.
++ * @momentum_vel_x: Scaled X velocity for momentum scrolling (atomic).
++ * @momentum_vel_y: Scaled Y velocity for momentum scrolling (atomic).
++ * @momentum_work: Delayed work that emits decaying scroll events after lift.
+  */
+ struct magicmouse_sc {
+ 	struct input_dev *input;
+@@ -151,6 +167,11 @@ struct magicmouse_sc {
+ 	int delta_y;
+ 	bool button_down;
+ 
++	/* Momentum scrolling */
++	atomic_t momentum_vel_x;       /* Scaled X velocity (atomic for cross-context access) */
++	atomic_t momentum_vel_y;       /* Scaled Y velocity */
++	struct delayed_work momentum_work;
++
+ 	struct {
+ 		short x;
+ 		short y;
+@@ -161,6 +182,10 @@ struct magicmouse_sc {
+ 		u8 size;
+ 		bool scroll_x_active;
+ 		bool scroll_y_active;
++		int vel_x_hr;         /* EWMA of emitted hi-res X steps (for momentum seed) */
++		int vel_y_hr;         /* EWMA of emitted hi-res Y steps (for momentum seed) */
++		bool scroll_x_reversed; /* Direction reversed during scroll, suppress momentum */
++		bool scroll_y_reversed;
+ 	} touches[16];
+ 	int tracking_ids[16];
+ 
+@@ -311,6 +336,15 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id, u8 *tda
+ 			msc->touches[id].scroll_y_hr = y;
+ 			msc->touches[id].scroll_x_active = false;
+ 			msc->touches[id].scroll_y_active = false;
++			msc->touches[id].vel_x_hr = 0;
++			msc->touches[id].vel_y_hr = 0;
++			msc->touches[id].scroll_x_reversed = false;
++			msc->touches[id].scroll_y_reversed = false;
++			if (scroll_momentum) {
++				atomic_set(&msc->momentum_vel_x, 0);
++				atomic_set(&msc->momentum_vel_y, 0);
++				cancel_delayed_work(&msc->momentum_work);
++			}
+ 
+ 			/* Reset acceleration after half a second. */
+ 			if (scroll_acceleration && time_before(now,
+@@ -349,11 +383,20 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id, u8 *tda
+ 			step_x_hr /= step_hr;
+ 			if (step_x_hr != 0 &&
+ 			    msc->touches[id].scroll_x_active) {
++				int emit_val_x = -step_x_hr * SCROLL_HR_MULT;
++
++				if (msc->touches[id].vel_x_hr != 0 &&
++				    (emit_val_x > 0) != (msc->touches[id].vel_x_hr > 0))
++					msc->touches[id].scroll_x_reversed = true;
+ 				msc->touches[id].scroll_x_hr -= step_x_hr *
+ 					step_hr;
+-				input_report_rel(input,
+-						 REL_HWHEEL_HI_RES,
+-						 -step_x_hr * SCROLL_HR_MULT);
++				input_report_rel(input, REL_HWHEEL_HI_RES,
++						 emit_val_x);
++				msc->touches[id].vel_x_hr =
++					(msc->touches[id].vel_x_hr * 3 + emit_val_x) / 4;
++			} else {
++				msc->touches[id].vel_x_hr =
++					msc->touches[id].vel_x_hr * 15 / 16;
+ 			}
+ 
+ 			if (!msc->touches[id].scroll_y_active &&
+@@ -366,11 +409,20 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id, u8 *tda
+ 			step_y_hr /= step_hr;
+ 			if (step_y_hr != 0 &&
+ 			    msc->touches[id].scroll_y_active) {
++				int emit_val_y = step_y_hr * SCROLL_HR_MULT;
++
++				if (msc->touches[id].vel_y_hr != 0 &&
++				    (emit_val_y > 0) != (msc->touches[id].vel_y_hr > 0))
++					msc->touches[id].scroll_y_reversed = true;
+ 				msc->touches[id].scroll_y_hr -= step_y_hr *
+ 					step_hr;
+-				input_report_rel(input,
+-						 REL_WHEEL_HI_RES,
+-						 step_y_hr * SCROLL_HR_MULT);
++				input_report_rel(input, REL_WHEEL_HI_RES,
++						 emit_val_y);
++				msc->touches[id].vel_y_hr =
++					(msc->touches[id].vel_y_hr * 3 + emit_val_y) / 4;
++			} else {
++				msc->touches[id].vel_y_hr =
++					msc->touches[id].vel_y_hr * 15 / 16;
+ 			}
+ 			break;
+ 		}
+@@ -387,6 +439,22 @@ static void magicmouse_emit_touch(struct magicmouse_sc *msc, int raw_id, u8 *tda
+ 		msc->scroll_accel = SCROLL_ACCEL_DEFAULT;
+ 	}
+ 
++	/* On finger lift, seed momentum from the tracked velocity. */
++	if (!down && scroll_momentum &&
++	    (msc->touches[id].scroll_x_active || msc->touches[id].scroll_y_active)) {
++		int vx = msc->touches[id].scroll_x_reversed ? 0 :
++			msc->touches[id].vel_x_hr * MOMENTUM_SCALE;
++		int vy = msc->touches[id].scroll_y_reversed ? 0 :
++			msc->touches[id].vel_y_hr * MOMENTUM_SCALE;
++
++		if (abs(vx) > MOMENTUM_START_SCALED || abs(vy) > MOMENTUM_START_SCALED) {
++			atomic_set(&msc->momentum_vel_x, vx);
++			atomic_set(&msc->momentum_vel_y, vy);
++			schedule_delayed_work(&msc->momentum_work,
++					      msecs_to_jiffies(MOMENTUM_INTERVAL_MS));
++		}
++	}
++
+ 	if (down)
+ 		msc->ntouches++;
+ 
+@@ -1055,6 +1123,40 @@ static void magicmouse_bt_battery_work_tick(struct work_struct *work)
+ 			      secs_to_jiffies(BATTERY_POLL_INTERVAL_SEC));
+ }
+ 
++static void magicmouse_momentum_work(struct work_struct *work)
++{
++	struct magicmouse_sc *msc =
++		container_of(work, struct magicmouse_sc, momentum_work.work);
++	struct input_dev *input = msc->input;
++	int vx, vy, emit_x, emit_y;
++
++	vx = atomic_read(&msc->momentum_vel_x);
++	vy = atomic_read(&msc->momentum_vel_y);
++
++	if (!vx && !vy)
++		return;
++
++	emit_x = vx / MOMENTUM_SCALE;
++	emit_y = vy / MOMENTUM_SCALE;
++
++	if (emit_x)
++		input_report_rel(input, REL_HWHEEL_HI_RES, emit_x);
++	if (emit_y)
++		input_report_rel(input, REL_WHEEL_HI_RES, emit_y);
++	if (emit_x || emit_y)
++		input_sync(input);
++
++	/* Decay: multiply by 0.97 (= 97/100) per 16 ms tick */
++	vx = vx * 97 / 100;
++	vy = vy * 97 / 100;
++	atomic_set(&msc->momentum_vel_x, vx);
++	atomic_set(&msc->momentum_vel_y, vy);
++
++	if (abs(vx) > MOMENTUM_MIN_SCALED || abs(vy) > MOMENTUM_MIN_SCALED)
++		schedule_delayed_work(&msc->momentum_work,
++				      msecs_to_jiffies(MOMENTUM_INTERVAL_MS));
++}
++
+ static int magicmouse_probe(struct hid_device *hdev,
+ 	const struct hid_device_id *id)
+ {
+@@ -1074,6 +1176,9 @@ static int magicmouse_probe(struct hid_device *hdev,
+ 	msc->scroll_accel = SCROLL_ACCEL_DEFAULT;
+ 	msc->hdev = hdev;
+ 	INIT_DEFERRABLE_WORK(&msc->work, magicmouse_enable_mt_work);
++	atomic_set(&msc->momentum_vel_x, 0);
++	atomic_set(&msc->momentum_vel_y, 0);
++	INIT_DELAYED_WORK(&msc->momentum_work, magicmouse_momentum_work);
+ 
+ 	msc->quirks = id->driver_data;
+ 	hid_set_drvdata(hdev, msc);
+@@ -1226,6 +1331,7 @@ static int magicmouse_probe(struct hid_device *hdev,
+ 
+ 	return 0;
+ err_stop_hw:
++	cancel_delayed_work_sync(&msc->momentum_work);
+ 	if (is_usb_magicmouse2(id->vendor, id->product) ||
+ 	    is_usb_magictrackpad2(id->vendor, id->product))
+ 		timer_delete_sync(&msc->battery_timer);
+@@ -1244,6 +1350,7 @@ static void magicmouse_remove(struct hid_device *hdev)
+ 
+ 	if (msc) {
+ 		cancel_delayed_work_sync(&msc->work);
++		cancel_delayed_work_sync(&msc->momentum_work);
+ 		if (is_usb_magicmouse2(hdev->vendor, hdev->product) ||
+ 		    is_usb_magictrackpad2(hdev->vendor, hdev->product))
+ 			timer_delete_sync(&msc->battery_timer);
