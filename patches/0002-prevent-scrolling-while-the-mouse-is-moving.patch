@@ -14,7 +14,7 @@ Add scroll_while_moving to restore the previous behavior.
  1 file changed, 17 insertions(+), 1 deletion(-)
 
 diff --git a/hid-magicmouse.c b/hid-magicmouse.c
-index 915b5f5..7b2fa30 100644
+index 2e54be9..07112e5 100644
 --- a/hid-magicmouse.c
 +++ b/hid-magicmouse.c
 @@ -51,6 +51,10 @@ static bool report_undeciphered;

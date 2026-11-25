@@ -13,11 +13,11 @@ device check because it can arrive during hid_hw_start(), and returning a
 negative value stops the HID core's own battery handler from overwriting
 the values with zeroes.
 ---
- hid-magicmouse.c | 187 +++++++++++++++++++++++++++++++++++++++++++++--
- 1 file changed, 182 insertions(+), 5 deletions(-)
+ hid-magicmouse.c | 186 +++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 181 insertions(+), 5 deletions(-)
 
 diff --git a/hid-magicmouse.c b/hid-magicmouse.c
-index 70734f5..ffa8405 100644
+index 17867d7..123a645 100644
 --- a/hid-magicmouse.c
 +++ b/hid-magicmouse.c
 @@ -15,6 +15,7 @@
@@ -136,11 +136,10 @@ index 70734f5..ffa8405 100644
  	/* Clear movement delta and click state for scroll tracking. */
  	msc->delta_x = 0;
  	msc->delta_y = 0;
-@@ -595,6 +660,16 @@ static int magicmouse_event(struct hid_device *hdev, struct hid_field *field,
- 		struct hid_usage *usage, __s32 value)
- {
- 	struct magicmouse_sc *msc = hid_get_drvdata(hdev);
-+
+@@ -599,6 +664,15 @@ static int magicmouse_event(struct hid_device *hdev, struct hid_field *field,
+ 	if (!msc || !msc->input)
+ 		return 0;
+ 
 +	/* Prevent the HID core's battery handler from overwriting the
 +	 * battery values we set from report 0x90.  The report descriptor
 +	 * contains battery usages that the kernel processes during normal
@@ -153,7 +152,7 @@ index 70734f5..ffa8405 100644
  	if ((msc->input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE2 ||
  	     msc->input->id.product == USB_DEVICE_ID_APPLE_MAGICMOUSE2_USBC) &&
  	    field->report->id == MOUSE2_REPORT_ID) {
-@@ -891,6 +966,14 @@ static bool is_bt_magictrackpad2(__u32 vendor, __u32 product)
+@@ -895,6 +969,14 @@ static bool is_bt_magictrackpad2(__u32 vendor, __u32 product)
  	       product == USB_DEVICE_ID_APPLE_MAGICTRACKPAD2_USBC;
  }
  
@@ -168,7 +167,7 @@ index 70734f5..ffa8405 100644
  static int magicmouse_fetch_battery(struct hid_device *hdev)
  {
  #ifdef CONFIG_HID_BATTERY_STRENGTH
-@@ -928,16 +1011,59 @@ static void magicmouse_battery_timer_tick(struct timer_list *t)
+@@ -932,16 +1014,59 @@ static void magicmouse_battery_timer_tick(struct timer_list *t)
  
  	if (magicmouse_fetch_battery(hdev) == 0) {
  		mod_timer(&msc->battery_timer,
@@ -229,7 +228,7 @@ index 70734f5..ffa8405 100644
  
  	msc = devm_kzalloc(&hdev->dev, sizeof(*msc), GFP_KERNEL);
  	if (msc == NULL) {
-@@ -958,6 +1084,14 @@ static int magicmouse_probe(struct hid_device *hdev,
+@@ -962,6 +1087,14 @@ static int magicmouse_probe(struct hid_device *hdev,
  		return ret;
  	}
  
@@ -244,7 +243,7 @@ index 70734f5..ffa8405 100644
  	ret = hid_hw_start(hdev, HID_CONNECT_DEFAULT);
  	if (ret) {
  		hid_err(hdev, "magicmouse hw start failed\n");
-@@ -978,10 +1112,45 @@ static int magicmouse_probe(struct hid_device *hdev,
+@@ -982,10 +1115,45 @@ static int magicmouse_probe(struct hid_device *hdev,
  	    is_usb_magictrackpad2(id->vendor, id->product)) {
  		timer_setup(&msc->battery_timer, magicmouse_battery_timer_tick, 0);
  		mod_timer(&msc->battery_timer,
@@ -291,7 +290,7 @@ index 70734f5..ffa8405 100644
  	if (is_usb_magicmouse2(id->vendor, id->product) ||
  	    (is_usb_magictrackpad2(id->vendor, id->product) &&
  	     hdev->type != HID_TYPE_USBMOUSE))
-@@ -1060,6 +1229,10 @@ err_stop_hw:
+@@ -1064,6 +1232,10 @@ err_stop_hw:
  	if (is_usb_magicmouse2(id->vendor, id->product) ||
  	    is_usb_magictrackpad2(id->vendor, id->product))
  		timer_delete_sync(&msc->battery_timer);
@@ -302,7 +301,7 @@ index 70734f5..ffa8405 100644
  
  	hid_hw_stop(hdev);
  	return ret;
-@@ -1074,6 +1247,10 @@ static void magicmouse_remove(struct hid_device *hdev)
+@@ -1078,6 +1250,10 @@ static void magicmouse_remove(struct hid_device *hdev)
  		if (is_usb_magicmouse2(hdev->vendor, hdev->product) ||
  		    is_usb_magictrackpad2(hdev->vendor, hdev->product))
  			timer_delete_sync(&msc->battery_timer);

@@ -11,7 +11,7 @@ SCROLL_ACCEL_MIN instead.
  1 file changed, 3 insertions(+), 1 deletion(-)
 
 diff --git a/hid-magicmouse.c b/hid-magicmouse.c
-index 60ff889..70734f5 100644
+index b04fd5d..17867d7 100644
 --- a/hid-magicmouse.c
 +++ b/hid-magicmouse.c
 @@ -86,6 +86,7 @@ MODULE_PARM_DESC(scroll_while_clicking, "Enable scrolling when a button is held"

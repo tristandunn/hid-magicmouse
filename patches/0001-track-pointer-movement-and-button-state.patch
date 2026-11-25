@@ -13,7 +13,7 @@ because magicmouse_emit_touch() consumes the state this records.
  1 file changed, 30 insertions(+), 12 deletions(-)
 
 diff --git a/hid-magicmouse.c b/hid-magicmouse.c
-index d637c04..915b5f5 100644
+index e6d4d49..2e54be9 100644
 --- a/hid-magicmouse.c
 +++ b/hid-magicmouse.c
 @@ -132,6 +132,9 @@ struct magicmouse_sc {

@@ -13,7 +13,7 @@ Add scroll_while_clicking to restore the previous behavior.
  1 file changed, 9 insertions(+), 3 deletions(-)
 
 diff --git a/hid-magicmouse.c b/hid-magicmouse.c
-index 7b2fa30..60ff889 100644
+index 07112e5..b04fd5d 100644
 --- a/hid-magicmouse.c
 +++ b/hid-magicmouse.c
 @@ -55,6 +55,10 @@ static bool scroll_while_moving = false;
